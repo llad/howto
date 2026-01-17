@@ -1,0 +1,16 @@
+# Editor/IDE
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Shell history/logs
+*.log
