@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# howto: natural language -> shell command via Codex CLI
+#
+# Single-file design:
+# - Executed: runs the CLI that prints a suggested command.
+# - Sourced: registers an interactive wrapper + readline key binding.
+#
+# Bash-only; the sourced mode assumes bash/readline.
+
+set -o noglob
+
+# -----------------------------
+# Sourced mode (interactive UX)
+# -----------------------------
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  # Only load in interactive shells.
+  [[ $- == *i* ]] || return 0
+
+  howto() {
+    if [ "$1" = "-p" ] || [ "$1" = "--print" ]; then
+      shift
+      command howto -p "$@"
+      return
+    fi
+
+    local cmd user_cmd
+    cmd="$(command howto -p "$@")" || return
+    if [ -z "$cmd" ]; then
+      return
+    fi
+
+    history -s "howto $*"
+    read -e -i "$cmd" -p "Command: " user_cmd
+    if [ -z "$user_cmd" ]; then
+      echo "Command not executed."
+      return
+    fi
+
+    history -s "$user_cmd"
+    eval "$user_cmd"
+  }
+
+  __howto_readline() {
+    local query cmd
+    query="$READLINE_LINE"
+    if [ -z "$query" ]; then
+      return
+    fi
+
+    history -s "howto $query"
+    printf '\n%s%s\n' "${PS1@P}" "howto $query"
+
+    cmd="$(howto -p "$query")" || return
+    if [ -z "$cmd" ]; then
+      return
+    fi
+
+    history -s "$cmd"
+    READLINE_LINE="$cmd"
+    READLINE_POINT=${#READLINE_LINE}
+  }
+
+  # Bind Ctrl+G to translate the current line into a command.
+  if command -v bind >/dev/null 2>&1; then
+    bind -x '"\C-g":__howto_readline'
+  fi
+
+  return 0
+fi
+
+# -----------------
+# Executed mode (CLI)
+# -----------------
+PRINT_ONLY=0
+if [ "$1" = "-p" ] || [ "$1" = "--print" ]; then
+  PRINT_ONLY=1
+  shift
+fi
+
+if [ $# -lt 1 ]; then
+  echo "Usage: howto [-p|--print] describe the command"
+  exit 1
+fi
+
+QUERY="$*"
+
+PROMPT=$(cat <<'EOP'
+You are a command-line assistant.
+Convert the user's request into a single POSIX-compatible shell command.
+
+Output format:
+- Output exactly one line: CMD: <command>
+- No other text, no code fences, no comments.
+
+Command rules:
+- Use a single shell command line suitable for /bin/sh.
+- Assume the current working directory is correct.
+- Do not include explanations or run commands.
+- Avoid destructive actions unless explicitly requested.
+
+User request:
+EOP
+)
+
+OUT_FILE="$(mktemp /tmp/codex-howto.XXXXXX)"
+trap 'rm -f "$OUT_FILE"' EXIT
+
+codex exec \
+  --sandbox read-only \
+  --skip-git-repo-check \
+  --output-last-message "$OUT_FILE" \
+  "$PROMPT
+$QUERY" >/dev/null 2>&1
+
+if [ ! -s "$OUT_FILE" ]; then
+  echo "No command returned (Codex produced no final message)."
+  exit 1
+fi
+
+RAW_OUT="$(cat "$OUT_FILE")"
+
+CMD="$(
+  printf "%s\n" "$RAW_OUT" \
+    | tr -d '\r`' \
+    | sed -n 's/^CMD:[[:space:]]*//p' \
+    | tail -n1 \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)"
+
+if [ -z "$CMD" ]; then
+  echo "No command returned (could not parse a command from Codex output)."
+  echo "Raw output was:"
+  printf '%s\n' "$RAW_OUT"
+  exit 1
+fi
+
+echo "$CMD"
